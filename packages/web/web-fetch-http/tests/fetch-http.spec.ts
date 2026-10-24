@@ -626,3 +626,28 @@ describe('web-fetch-http plugin registration', () => {
     await fiber.dispose()
   })
 })
+
+describe('research HTTP options', () => {
+  it('decodes HTML meta charset without a response charset', async () => {
+    handler = (_req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(Buffer.concat([Buffer.from('<meta charset="gb2312"><p>'), Buffer.from([0xb9,0xe2,0xd1,0xb8,0xbf,0xc6,0xbc,0xbc]), Buffer.from('</p>')])) }
+    const result = await provider().fetch({ url: base })
+    expect(result.body).toEqual({ kind: 'html', content: '<meta charset="gb2312"><p>光迅科技</p>' })
+  })
+  it('preserves an HTTP error with no content type', async () => {
+    handler = (_req, res) => { res.writeHead(403); res.end('forbidden') }
+    const result = await provider().fetch({ url: base })
+    expect(result.statusCode).toBe(403)
+  })
+  it('accepts explicit referer and script text without executing it', async () => {
+    handler = (req, res) => { res.writeHead(req.headers.referer === 'https://finance.example/' ? 200 : 403, { 'content-type': 'application/javascript; charset=GB18030' }); res.end('var quote="52.98";') }
+    const result = await provider().fetchWithOptions({ url: base }, { headers: { Referer: 'https://finance.example/' }, allowScriptText: true })
+    expect(result.statusCode).toBe(200)
+    expect(result.body).toEqual({ kind: 'text', content: 'var quote="52.98";' })
+    expect(result.encoding).toBe('gb18030')
+    expect(result.replacementCount).toBe(0)
+  })
+  it('rejects credentials and invalid explicit encoding', async () => {
+    await expect(provider().fetchWithOptions({ url: base }, { headers: { Cookie: 'x=y' } })).rejects.toThrow()
+    await expect(provider().fetchWithOptions({ url: base }, { encoding: 'not-a-charset' })).rejects.toThrow()
+  })
+})

@@ -143,3 +143,5 @@ const page = await ctx.web.fetch({ url: 'https://example.com' })
 无。
 
 </details>
+
+公开方法 `fetchWithOptions(request, options, signal)` 支持显式匿名 Accept、Accept-Language、Referer、User-Agent 请求头、编码覆盖以及可选的 JavaScript 文本响应。返回内容类型、实际编码和替换字符数。解码依次使用显式编码、HTTP charset、BOM、前 4096 字节中的 HTML meta charset、UTF-8。HTTP 错误即使缺少受支持的内容类型也保留状态码，不执行响应脚本。

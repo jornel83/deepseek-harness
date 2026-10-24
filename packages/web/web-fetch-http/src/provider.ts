@@ -13,7 +13,7 @@ import type { Response } from 'undici'
 import { proxyRouteFor } from '@deepseek-ai/dsh-http-proxy'
 import { isNonPublicIpLiteral, publicHttpNetwork } from './network.ts'
 import type { PublicAddress } from './network.ts'
-import { classifyContentType, decoderForCharset, isSameOrigin, parseCharset, validateFetchUrl } from './policy.ts'
+import { classifyContentType, decoderForCharset, isSameOrigin, parseCharset, validateFetchUrl, responseEncoding, publicHeaders } from './policy.ts'
 
 /** Resolved provider limits (the plugin's schemastery Config supplies defaults). */
 export interface HttpFetchLimits {
@@ -27,6 +27,26 @@ export interface HttpFetchLimits {
   maxRedirects: number
   /** `User-Agent` header sent on every request. */
   userAgent: string
+}
+
+/** Explicit anonymous request options; script responses remain inert text. */
+export interface HttpFetchOptions {
+  /** Non-credential request headers accepted by publicHeaders. */
+  headers?: Record<string, string>
+  /** Explicit TextDecoder charset override. */
+  encoding?: string
+  /** Accept application/javascript as inert text. */
+  allowScriptText?: boolean
+}
+
+/** Decoded response with diagnostics for downstream extraction. */
+export interface HttpFetchResponse extends WebFetchResult {
+  /** Original response Content-Type when present. */
+  contentType?: string
+  /** Effective decoder encoding. */
+  encoding: string
+  /** Replacement characters in the decoded response. */
+  replacementCount: number
 }
 
 /** Resolve one hostname to an already policy-validated address set. */
@@ -54,21 +74,34 @@ export class HttpFetchProvider implements WebFetchProvider {
   }
 
   async fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult> {
+    return this.fetchWithOptions(request, {}, signal)
+  }
+
+  /**
+   * Retrieve an anonymous response with explicit decoding and header options.
+   * @param request - public HTTP URL.
+   * @param options - non-credential headers and decoding choices.
+   * @param signal - caller cancellation.
+   * @returns bounded decoded response and transport diagnostics.
+   */
+  async fetchWithOptions(request: WebFetchRequest, options: HttpFetchOptions, signal?: AbortSignal): Promise<HttpFetchResponse> {
+    publicHeaders(options.headers)
+    if (options.encoding !== undefined) decoderForCharset(options.encoding)
     if (signal?.aborted) throw new WebError('web fetch aborted', 'WEB_ABORTED')
 
     // One signal stops both the request and body read. The deadline's TimeoutReason later
     // distinguishes this provider's timeout from caller or outer-deadline cancellation.
     using d = deadline(signal, this.limits.timeoutMs, 'WEB_FETCH_TIMEOUT')
-    return await this.followAndRead(request.url, d.signal)
+    return await this.followAndRead(request.url, d.signal, options)
   }
 
   /** Follow same-origin redirects up to the hop cap, then read the final response. */
-  private async followAndRead(initialUrl: string, signal: AbortSignal): Promise<WebFetchResult> {
+  private async followAndRead(initialUrl: string, signal: AbortSignal, options: HttpFetchOptions): Promise<HttpFetchResponse> {
     let currentUrl = validateFetchUrl(initialUrl)
     let redirectsFollowed = 0
 
     for (;;) {
-      const request = await this.requestOnce(currentUrl, signal)
+      const request = await this.requestOnce(currentUrl, signal, options)
       const { response } = request
       try {
         if (isRedirectStatus(response.status)) {
@@ -107,17 +140,18 @@ export class HttpFetchProvider implements WebFetchProvider {
           continue
         }
 
-        return await this.readBody(response, currentUrl, signal)
+        return await this.readBody(response, currentUrl, signal, options)
       } finally {
         await request.close()
       }
     }
   }
 
-  private async requestOnce(url: URL, signal: AbortSignal) {
+  private async requestOnce(url: URL, signal: AbortSignal, options: HttpFetchOptions) {
     const headers = {
       'user-agent': this.limits.userAgent,
       'accept': 'text/html,application/xhtml+xml,text/*;q=0.9,application/json;q=0.8',
+      ...publicHeaders(options.headers),
     }
     try {
       // A proxied hop skips public-address resolution and pinning: the proxy performs the origin's
@@ -144,25 +178,25 @@ export class HttpFetchProvider implements WebFetchProvider {
   }
 
   /** Read, byte-cap, classify, and decode the final response body. */
-  private async readBody(response: Response, finalUrl: URL, signal: AbortSignal): Promise<WebFetchResult> {
+  private async readBody(response: Response, finalUrl: URL, signal: AbortSignal, options: HttpFetchOptions): Promise<HttpFetchResponse> {
     const contentType = response.headers.get('content-type')
-    const kind = classifyContentType(contentType)
+    const success = response.status >= 200 && response.status < 300
+    const script = options.allowScriptText && /^application\/(?:x-)?(?:java|ecma)script(?:;|$)/i.test(contentType ?? '')
+    const kind = classifyContentType(contentType) ?? (script || !success ? 'text' : undefined)
     if (kind === undefined) {
       await response.body?.cancel()
       throw new WebError(`unsupported content type "${contentType ?? 'unknown'}"`, 'WEB_UNSUPPORTED_CONTENT_TYPE')
     }
 
-    // Resolve the decoder BEFORE reading the body so an unsupported charset
-    // fails without consuming the stream — but cancel the body on that failure
-    // so the socket does not leak (matching the unsupported-content-type path).
-    let decoder: TextDecoder
+    // Reject unsupported declared encodings without consuming the stream.
     try {
-      decoder = decoderForCharset(parseCharset(contentType))
+      if (success) decoderForCharset(options.encoding ?? parseCharset(contentType))
     } catch (error: unknown) {
       await response.body?.cancel()
       throw error
     }
     const { bytes, truncatedByBytes } = await this.readCapped(response, signal)
+    const decoder = responseEncoding(bytes, kind, contentType, options.encoding, success)
     const decoded = decoder.decode(bytes)
     const truncatedByChars = decoded.length > this.limits.maxBodyChars
     const content = truncatedByChars ? decoded.slice(0, this.limits.maxBodyChars) : decoded
@@ -171,6 +205,9 @@ export class HttpFetchProvider implements WebFetchProvider {
     return {
       url: finalUrl.toString(),
       statusCode: response.status,
+      ...(contentType === null ? {} : { contentType }),
+      encoding: decoder.encoding,
+      replacementCount: decoded.split('\uFFFD').length - 1,
       body,
       truncated: truncatedByBytes || truncatedByChars,
     }

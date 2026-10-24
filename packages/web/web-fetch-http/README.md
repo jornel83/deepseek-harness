@@ -143,3 +143,5 @@ These limits define when the provider is unsafe or a poor fit. They are current 
 None.
 
 </details>
+
+The public `fetchWithOptions(request, options, signal)` method accepts explicit anonymous Accept, Accept-Language, Referer and User-Agent headers, an encoding override, and opt-in inert JavaScript response text. It returns content type, effective encoding and replacement-character count. Decoding prefers an explicit override, HTTP charset, BOM, HTML meta charset in the first 4096 bytes, then UTF-8. HTTP failures retain their status even without a supported content type. No response script is executed.

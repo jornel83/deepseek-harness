@@ -116,3 +116,53 @@ export function decoderForCharset(charset: string | undefined): TextDecoder {
     throw new WebError(`unsupported charset "${charset}"`, 'WEB_UNSUPPORTED_CONTENT_TYPE', { cause: error })
   }
 }
+
+/**
+ * Validate anonymous request headers before network dispatch.
+ * @param headers - explicitly supplied headers.
+ * @returns lowercase header names with unchanged values.
+ */
+export function publicHeaders(headers: Record<string, string> = {}): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.toLowerCase()
+    if (!['accept', 'accept-language', 'referer', 'user-agent'].includes(key) || /[\r\n]/.test(value)) {
+      throw new WebError('unsupported public request header', 'WEB_BLOCKED_URL')
+    }
+    if (key === 'referer') validateFetchUrl(value)
+    result[key] = value
+  }
+  return result
+}
+
+/**
+ * Choose decoding from explicit override, HTTP charset, BOM, HTML meta, then UTF-8.
+ * @param bytes - bounded response bytes.
+ * @param kind - response body classification.
+ * @param contentType - HTTP Content-Type.
+ * @param override - explicit charset, if supplied.
+ * @param success - whether an HTTP failure must retain its status despite a bad charset.
+ * @returns the effective decoder.
+ */
+export function responseEncoding(
+  bytes: Uint8Array,
+  kind: FetchableKind,
+  contentType: string | null,
+  override: string | undefined,
+  success: boolean,
+): TextDecoder {
+  if (override !== undefined) return decoderForCharset(override)
+  const declared = parseCharset(contentType)
+  if (declared !== undefined) {
+    try { return decoderForCharset(declared) } catch (error: unknown) { if (success) throw error }
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le')
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be')
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return new TextDecoder('utf-8')
+  if (kind === 'html') {
+    const prefix = new TextDecoder('latin1').decode(bytes.subarray(0, 4096))
+    const meta = /<meta\b[^>]*\bcharset\s*=\s*["']?\s*([a-z0-9_-]+)/i.exec(prefix)
+    if (meta?.[1]) return decoderForCharset(meta[1])
+  }
+  return new TextDecoder('utf-8')
+}
