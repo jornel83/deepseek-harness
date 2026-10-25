@@ -162,7 +162,9 @@ export function responseEncoding(
   if (kind === 'html') {
     const prefix = new TextDecoder('latin1').decode(bytes.subarray(0, 4096))
     const meta = /<meta\b[^>]*\bcharset\s*=\s*["']?\s*([a-z0-9_-]+)/i.exec(prefix)
-    if (meta?.[1]) return decoderForCharset(meta[1])
+    if (meta?.[1]) {
+      try { return decoderForCharset(meta[1]) } catch (error: unknown) { if (success) throw error }
+    }
   }
   return new TextDecoder('utf-8')
 }

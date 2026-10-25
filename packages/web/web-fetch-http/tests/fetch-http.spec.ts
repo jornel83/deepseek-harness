@@ -638,6 +638,16 @@ describe('research HTTP options', () => {
     const result = await provider().fetch({ url: base })
     expect(result.statusCode).toBe(403)
   })
+  it('preserves HTTP failure status despite an invalid HTML meta charset', async () => {
+    handler = (_req, res) => {
+      res.writeHead(403, { 'content-type': 'text/html' })
+      res.end('<meta charset="bogus"><p>Forbidden</p>')
+    }
+    const result = await provider().fetchWithOptions({ url: base }, {})
+    expect(result.statusCode).toBe(403)
+    expect(result.encoding).toBe('utf-8')
+    expect(result.body.content).toContain('Forbidden')
+  })
   it('accepts explicit referer and script text without executing it', async () => {
     handler = (req, res) => { res.writeHead(req.headers.referer === 'https://finance.example/' ? 200 : 403, { 'content-type': 'application/javascript; charset=GB18030' }); res.end('var quote="52.98";') }
     const result = await provider().fetchWithOptions({ url: base }, { headers: { Referer: 'https://finance.example/' }, allowScriptText: true })
